@@ -1,0 +1,1 @@
+..\..\CarlaUE4.exe /Game/Maps/Town02 -windowed -ResX=840 -ResY=480 -carla-server
