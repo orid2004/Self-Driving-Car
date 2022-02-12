@@ -1,0 +1,26 @@
+<annotation>
+	<folder>data</folder>
+	<filename></filename>
+	<path></path>
+	<source>
+		<database>Unknown</database>
+	</source>
+	<size>
+		<width>200</width>
+		<height>200</height>
+		<depth>3</depth>
+	</size>
+	<segmented>0</segmented>
+	<object>
+		<name>speedlimit</name>
+		<pose>Unspecified</pose>
+		<truncated>0</truncated>
+		<difficult>0</difficult>
+		<bndbox>
+			<xmin></xmin>
+			<ymin></ymin>
+			<xmax></xmax>
+			<ymax></ymax>
+		</bndbox>
+	</object>
+</annotation>

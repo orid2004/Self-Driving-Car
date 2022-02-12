@@ -52,7 +52,7 @@ class Filters:
     """
     SPEED_LIMIT_CROP = Filter(
         {
-            FilterKeys.CROP: (0, 600, 300, 800)
+            FilterKeys.CROP: (0, 600, 400, 800)
         }
     )
     """
@@ -61,10 +61,12 @@ class Filters:
     """
     SPEED_LIMIT_SEARCH_AREA = Filter(
         {
-            FilterKeys.SIZE: (300, 350),
-            FilterKeys.CORDS: ((0, 0), (150, 0), (300, 0),
-                               (0, 150), (150, 150), (300, 150),
-                               (150, 150), (200, 100), (400, 200))
+            FilterKeys.SIZE: (200, 200),
+            FilterKeys.CORDS: (
+                (0, 0), (100, 0), (200, 0), (300, 0), (400, 0),
+                (0, 100), (100, 100), (200, 100), (300, 100), (400, 100),
+                (0, 200), (100, 200), (200, 200), (300, 200), (400, 200)
+            )
         }
     )
 

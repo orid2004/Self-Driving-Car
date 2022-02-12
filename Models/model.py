@@ -42,7 +42,7 @@ class Model:
             use_display_name=True
         )
         self.datasets = []
-        self.min_score = .8
+        self.min_score = .75
         self.num_detections = 0
         self._warmup()
 
@@ -79,10 +79,7 @@ class Model:
         Model warmup as ...
         'The TensorFlow runtime has components that are lazily initialized'
         """
-        for img in random.sample(
-                glob.glob(
-                    "..\\test\\Limit*.jpg"),
-                5):
+        for img in random.sample(glob.glob("test\\Limit*.jpg"), 5):
             self.get_detections(np.array(Image.open(img)))
 
     @staticmethod

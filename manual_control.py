@@ -71,6 +71,13 @@ WINDOW_HEIGHT = 600
 WARMUP_LENGTH = 5
 
 
+def detection_model_path(name, version):
+    path = os.path.join(f"object_detection\\models\\{name}\\v{version}\\checkpoint")
+    if os.path.isdir(path):
+        return path
+    raise FileNotFoundError(path)
+
+
 class Models:
     """
     Object detection models
@@ -79,9 +86,9 @@ class Models:
         speed limit signs detection
     """
     SPEED_LIMIT = Model(
-        ckpt_path="object_detection\\models\\speedlimit",
+        ckpt_path=detection_model_path("speedlimit", 3),
         ckpt_index=0,
-        label_map_path=os.path.join("object_detection\\models\\speedlimit\\labelmap.pbtxt"),
+        label_map_path=os.path.join(detection_model_path("speedlimit", 3), "labelmap.pbtxt"),
         max_detections=10
     )
 
@@ -384,16 +391,15 @@ class CarlaGame(object):
                     tf_detections = self.speedlimit_model.get_tf_detections(im)
                     detections = self.speedlimit_model.get_detections(im, tf_detections)
                     self.speedlimit_model.num_detections += len(detections.keys())
-                    if detections is not None:
-                        if "speedlimit" in detections:
-                            if detections["speedlimit"][0] >= 80:
-                                cv2.imshow("Max-Speed",
-                                           self.speedlimit_model.get_image_np_with_detections(im, tf_detections))
+                    if detections is not None and "speedlimit" in detections:
+                        if detections["speedlimit"][0] >= 75:
+                            cv2.imshow("Max-Speed",
+                                       self.speedlimit_model.get_image_np_with_detections(im, tf_detections))
                 else:
                     self.speedlimit_model.datasets.insert(0, (im for im in dataset))
                     break
         if self.timer.sec_loop():
-            if self.distance > 2:
+            if self.distance > 3:
                 self.speedlimit_model.datasets.clear()
                 self.distance = 0
             self.timer.start()
@@ -503,6 +509,7 @@ def main():
     while True:
         try:
             with make_carla_client(args.host, args.port) as client:
+                print("Connecting to:", args.host)
                 game = CarlaGame(client, args)
                 game.execute()
                 break
