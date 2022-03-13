@@ -18,9 +18,12 @@ Use ARROWS or WASD keys for control.
 
 from __future__ import print_function
 
+import uuid
 import argparse
 import logging
 import time
+import cv2
+import disnet.job
 
 try:
     import pygame
@@ -57,40 +60,17 @@ from carla.client import make_carla_client, VehicleControl
 from carla.planner.map import CarlaMap
 from carla.settings import CarlaSettings
 from carla.tcp import TCPConnectionError
-from carla.util import print_over_same_line
 
-from Image.buffer import *
-from Image.editor import *
-
-from Models.model import *
+import selfdrive
+from selfdrive.image.editor import ImageEditor
+from selfdrive.image.buffer import ImageBuffer
 
 from timer import SecTimer
 
+from disnet.base import Admin
+
 WINDOW_WIDTH = 800
 WINDOW_HEIGHT = 600
-WARMUP_LENGTH = 5
-
-
-def detection_model_path(name, version):
-    path = os.path.join(f"object_detection\\models\\{name}\\v{version}\\checkpoint")
-    if os.path.isdir(path):
-        return path
-    raise FileNotFoundError(path)
-
-
-class Models:
-    """
-    Object detection models
-    Models are well-trained and ready to be restored
-    [1] SpeedLimit
-        speed limit signs detection
-    """
-    SPEED_LIMIT = Model(
-        ckpt_path=detection_model_path("speedlimit", 3),
-        ckpt_index=0,
-        label_map_path=os.path.join(detection_model_path("speedlimit", 3), "labelmap.pbtxt"),
-        max_detections=10
-    )
 
 
 def make_carla_settings(args):
@@ -146,6 +126,13 @@ class Timer(object):
         return time.time() - self._lap_time
 
 
+class SpeedLimitEditor(ImageEditor):
+    def __init__(self):
+        super().__init__()
+        self.circle_crop = selfdrive.image.editor.CIRCLE_CROP(minDist=6, dp=1.1, param1=150,
+                                                              param2=50, minRadius=20, maxRadius=50)
+
+
 class CarlaGame(object):
     def __init__(self, carla_client, args):
         """
@@ -183,7 +170,12 @@ class CarlaGame(object):
         self.last_detections = 0
         self.player_measurements = None
         self.distance = 0
-        self.speedlimit_model = Models.SPEED_LIMIT
+        self.check_limit = True
+        self.max_speed = 50
+        print("connecting to memcache...")
+        self.admin = Admin(host="127.0.0.1")
+        self.admin.connect(supported_jobs=[])
+        self.sl_jobs = 0
 
     def execute(self):
         """Launch the PyGame."""
@@ -239,29 +231,6 @@ class CarlaGame(object):
             # workarounds for carla 8.0.2, as there's no support for python 3.7
             pass
         if measurements is not None and sensor_data is not None:
-            # Print measurements every second.
-            if self._timer.elapsed_seconds_since_lap() > 1.0:
-                if self._city_name is not None:
-                    # Function to get car position on map.
-                    map_position = self._map.convert_to_pixel([
-                        measurements.player_measurements.transform.location.x,
-                        measurements.player_measurements.transform.location.y,
-                        measurements.player_measurements.transform.location.z])
-                    # Function to get orientation of the road car is in.
-                    lane_orientation = self._map.get_lane_orientation([
-                        measurements.player_measurements.transform.location.x,
-                        measurements.player_measurements.transform.location.y,
-                        measurements.player_measurements.transform.location.z])
-                    self._print_player_measurements_map(
-                        measurements.player_measurements,
-                        map_position,
-                        lane_orientation)
-                else:
-                    self.player_measurements = measurements.player_measurements
-                    self._print_player_measurements(measurements.player_measurements)
-                # Plot position on the map as well.
-                self._timer.lap()
-
             control = self._get_keyboard_control(pygame.key.get_pressed())
             if self.on_capture:
                 control = VehicleControl()
@@ -292,7 +261,10 @@ class CarlaGame(object):
         if keys[K_RIGHT] or keys[K_d]:
             control.steer = 1.0
         if keys[K_UP] or keys[K_w]:
-            control.throttle = 1.0
+            if self._get_speed() <= self.max_speed:
+                control.throttle = 1.0
+            else:
+                control.throttle = 0.5
         if keys[K_DOWN] or keys[K_s]:
             control.brake = 1.0
         if keys[K_SPACE]:
@@ -311,9 +283,9 @@ class CarlaGame(object):
             print("[OFF] capture mode")
         if keys[K_c]:
             if not self.on_capture:
-                self.im_buff.save_to_disk(Filters.SPEED_LIMIT_CROP)
+                self.im_buff.save_to_disk(selfdrive.image.filters.CROP_SPEEDLIMIT_SCREEN)
             else:
-                print("Ignoring... Cannot save data while on capture mode.")
+                print("Cannot save data while on capture mode.")
         if keys[K_t]:
             self.on_auto = True
             print("[ON] auto pilot")
@@ -324,48 +296,12 @@ class CarlaGame(object):
         control.reverse = self._is_on_reverse
         return control
 
-    def _print_player_measurements_map(
-            self,
-            player_measurements,
-            map_position,
-            lane_orientation):
-        """Logging"""
-        message = 'Step {step} ({fps:.1f} FPS): '
-        message += 'Map Position ({map_x:.1f},{map_y:.1f}) '
-        message += 'Lane Orientation ({ori_x:.1f},{ori_y:.1f}) '
-        message += '{speed:.2f} km/h, '
-        message += '{other_lane:.0f}% other lane, {offroad:.0f}% off-road'
-        message = message.format(
-            map_x=map_position[0],
-            map_y=map_position[1],
-            ori_x=lane_orientation[0],
-            ori_y=lane_orientation[1],
-            step=self._timer.step,
-            fps=self._timer.ticks_per_second(),
-            speed=player_measurements.forward_speed * 3.6,
-            other_lane=100 * player_measurements.intersection_otherlane,
-            offroad=100 * player_measurements.intersection_offroad)
-        print_over_same_line(message)
-
-    def _print_player_measurements(self, player_measurements):
-        """Logging"""
-        message = 'Step {step} ({fps:.1f} FPS): '
-        message += '{speed:.2f} km/h, '
-        message += '{other_lane:.0f}% other lane, {offroad:.0f}% off-road'
-        message = message.format(
-            step=self._timer.step,
-            fps=self._timer.ticks_per_second(),
-            speed=player_measurements.forward_speed * 3.6,
-            other_lane=100 * player_measurements.intersection_otherlane,
-            offroad=100 * player_measurements.intersection_offroad)
-        print_over_same_line(message)
-
     def _get_speed(self):
         if self.player_measurements is None:
             return 0
         return self.player_measurements.forward_speed * 3.6
 
-    def _handle_speedlimit_detection(self, array):
+    def _handle_speedlimit_detection(self, image_np):
         """
         Receives potential speedlimit detections
         params:
@@ -373,37 +309,44 @@ class CarlaGame(object):
         return:
             None
         """
-        self.editor.img = array
-        self.editor.implement_filter(Filters.SPEED_LIMIT_CROP)
+        self.editor.img = image_np
+        self.editor.implement_filter(selfdrive.image.filters.CROP_SPEEDLIMIT_SCREEN)
         dataset = self.editor.crop_search_areas(
-            size=Filters.SPEED_LIMIT_SEARCH_AREA[FilterKeys.SIZE],
-            cords=Filters.SPEED_LIMIT_SEARCH_AREA[FilterKeys.CORDS],
+            size=selfdrive.image.filters.CROP_SPEEDLIMIT_AREA.size,
+            cords=selfdrive.image.filters.CROP_SPEEDLIMIT_AREA.cords,
             function=self.editor.crop_circle_box
         )
-        if next(dataset, None) is not None:
-            Models.SPEED_LIMIT.datasets.append(dataset)
-        if len(self.speedlimit_model.datasets) > 200:
-            self.speedlimit_model.datasets = self.speedlimit_model.datasets[100:]
-        if len(self.speedlimit_model.datasets) > 0:
-            dataset = self.speedlimit_model.datasets.pop(0)
+        # num_datasets = len(self.models["speedlimit"].datasets)
+        # if next(dataset, None) is not None:
+        # self.models["speedlimit"].datasets.insert(0, dataset)
+        # if num_datasets > 200:
+        # self.models["speedlimit"].datasets = self.models["speedlimit"].datasets[100:]
+        num_datasets = 1
+        if num_datasets > 0:
+            # dataset = self.models["speedlimit"].datasets.pop(0)
             for (im, (x, y, r)) in dataset:
-                if self.speedlimit_model.is_allowed():
-                    tf_detections = self.speedlimit_model.get_tf_detections(im)
-                    detections = self.speedlimit_model.get_detections(im, tf_detections)
-                    self.speedlimit_model.num_detections += len(detections.keys())
-                    if detections is not None and "speedlimit" in detections:
-                        if detections["speedlimit"][0] >= 75:
-                            cv2.imshow("Max-Speed",
-                                       self.speedlimit_model.get_image_np_with_detections(im, tf_detections))
-                else:
-                    self.speedlimit_model.datasets.insert(0, (im for im in dataset))
-                    break
+                if self.sl_jobs < 10:
+                    self.admin.add_job(
+                        disnet.job.Job(
+                            type="speedlimit",
+                            id=str(uuid.uuid1()),
+                            args=(im,)
+                        )
+                    )
+                    self.sl_jobs += 1
+                    print("new job", time.time())
+                """
+                OCR preprocessing
+                r += 15
+                left, top, right, bottom = selfdrive.image.editor.adjust_image_box(
+                    box=(x - r, y - r, x + r, y + r),
+                    shape=im.shape
+                )
+                image = im[top:bottom, left:right]
+                """
         if self.timer.sec_loop():
-            if self.distance > 3:
-                self.speedlimit_model.datasets.clear()
-                self.distance = 0
+            self.sl_jobs = 0
             self.timer.start()
-            self.speedlimit_model.num_detections = 0
 
     def _update_distance(self):
         if self.timer.sec_loop():
@@ -462,50 +405,50 @@ class CarlaGame(object):
 
 
 def main():
-    argparser = argparse.ArgumentParser(
+    parser = argparse.ArgumentParser(
         description='CARLA Manual Control Client')
-    argparser.add_argument(
+    parser.add_argument(
         '-v', '--verbose',
         action='store_true',
         dest='debug',
         help='print debug information')
-    argparser.add_argument(
+    parser.add_argument(
         '--host',
         metavar='H',
         default='localhost',
         help='IP of the host server (default: localhost)')
-    argparser.add_argument(
+    parser.add_argument(
         '-p', '--port',
         metavar='P',
         default=2000,
         type=int,
         help='TCP port to listen to (default: 2000)')
-    argparser.add_argument(
+    parser.add_argument(
         '-a', '--autopilot',
         action='store_true',
         help='enable autopilot')
-    argparser.add_argument(
+    parser.add_argument(
         '-l', '--lidar',
         action='store_true',
         help='enable Lidar')
-    argparser.add_argument(
+    parser.add_argument(
         '-q', '--quality-level',
         choices=['Low', 'Epic'],
         type=lambda s: s.title(),
         default='Epic',
         help='graphics quality level, a lower level makes the simulation run considerably faster.')
-    argparser.add_argument(
+    parser.add_argument(
         '-m', '--map-name',
         metavar='M',
         default=None,
         help='plot the map of the current city (needs to match active map in '
              'server, options: Town01 or Town02)')
-    args = argparser.parse_args()
+    args = parser.parse_args()
     log_level = logging.DEBUG if args.debug else logging.INFO
     logging.basicConfig(format='%(levelname)s: %(message)s', level=log_level)
     logging.info('listening to server %s:%s', args.host, args.port)
     print(__doc__)
-
+    # load_models()
     while True:
         try:
             with make_carla_client(args.host, args.port) as client:

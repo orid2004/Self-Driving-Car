@@ -1,11 +1,6 @@
 .idea/*
 __pycache__/*
-data/*
-DR/*
-DR_Data/*
 output/*
-save.txt
+build/*
 generate.py
-test.py
-scripts/*
-dr.py
+local_client.py
