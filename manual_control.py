@@ -18,12 +18,16 @@ Use ARROWS or WASD keys for control.
 
 from __future__ import print_function
 
+import gc
+import pickle
+import queue
+import threading
 import uuid
 import argparse
 import logging
 import time
 import cv2
-import disnet.job
+import pymemcache.client.base as base
 
 try:
     import pygame
@@ -64,13 +68,40 @@ from carla.tcp import TCPConnectionError
 import selfdrive
 from selfdrive.image.editor import ImageEditor
 from selfdrive.image.buffer import ImageBuffer
-
+import datetime
 from timer import SecTimer
 
-from disnet.base import Admin
+from disnet.client import Admin
+from disnet.job import Job
 
 WINDOW_WIDTH = 800
 WINDOW_HEIGHT = 600
+
+filter = selfdrive.image.filters.CROP_SPEEDLIMIT_AREA
+filter.cords = (
+    (0, 0), (50, 0), (100, 0), (150, 0), (200, 0), (250, 0), (300, 0), (350, 0), (400, 0),
+    (0, 50), (50, 50), (100, 50), (150, 50), (200, 50), (250, 50), (300, 50), (350, 50), (400, 50),
+    (0, 100), (50, 100), (100, 100), (150, 100), (200, 100), (250, 100), (300, 100), (350, 100), (400, 100),
+    (0, 150), (50, 150), (100, 150), (150, 150), (200, 150), (250, 150), (300, 150), (350, 150), (400, 150),
+    (0, 200), (50, 200), (100, 200), (150, 200), (200, 200), (250, 200), (300, 200), (350, 200), (400, 200),
+)
+"""
+CONST = 50
+x, y = 0, 0
+cords = []
+while 1:
+    cords.append((x,y))
+    x += CONST
+    if x == 400 + CONST:
+        if y == 200:
+            break
+        else:
+            x = 0
+            y += CONST
+
+filter.cords = tuple(cords)
+print(filter.cords)
+"""
 
 
 def make_carla_settings(args):
@@ -165,17 +196,35 @@ class CarlaGame(object):
         self.im_buff = ImageBuffer("data")  # image buffer for data saving
         self.on_auto = True  # toggle auto-pilot
         self.editor = SpeedLimitEditor()  # speedlimit image editor for preprocessing
-        cv2.namedWindow("Max-Speed", cv2.WINDOW_NORMAL)  # speedlimit detections window
-        cv2.resizeWindow("Max-Speed", 200, 200)
         self.last_detections = 0
         self.player_measurements = None
         self.distance = 0
         self.check_limit = True
         self.max_speed = 50
         print("connecting to memcache...")
-        self.admin = Admin(host="127.0.0.1")
-        self.admin.connect(supported_jobs=[])
+        self.admin = Admin(host="192.168.14.104")
+        self.admin.connect(supported_jobs=("admin", ["speedlimit"]))
+        self.jobs_queue = []
+        self.screens = {}
         self.sl_jobs = 0
+        self.start_time = time.time()
+        self.image_queue = queue.Queue()
+        self.frame = 0
+        threading.Thread(target=self._process_detections).start()
+        threading.Thread(target=self._process_detections).start()
+        threading.Thread(target=self._process_detections).start()
+        threading.Thread(target=self._process_detections).start()
+        threading.Thread(target=self._share_jobs).start()
+
+    def _share_jobs(self):
+        while True:
+            try:
+                while len(self.jobs_queue) > 0:
+                    self.admin.put_jobs(self.jobs_queue)
+                    self.jobs_queue = []
+            except Exception as e:
+                print(e)
+            time.sleep(0.1)
 
     def execute(self):
         """Launch the PyGame."""
@@ -301,6 +350,12 @@ class CarlaGame(object):
             return 0
         return self.player_measurements.forward_speed * 3.6
 
+    def _process_detections(self):
+        while True:
+            while self.image_queue.qsize() > 0:
+                self._handle_speedlimit_detection(self.image_queue.get())
+            time.sleep(0.05)
+
     def _handle_speedlimit_detection(self, image_np):
         """
         Receives potential speedlimit detections
@@ -311,9 +366,15 @@ class CarlaGame(object):
         """
         self.editor.img = image_np
         self.editor.implement_filter(selfdrive.image.filters.CROP_SPEEDLIMIT_SCREEN)
+        """
         dataset = self.editor.crop_search_areas(
             size=selfdrive.image.filters.CROP_SPEEDLIMIT_AREA.size,
             cords=selfdrive.image.filters.CROP_SPEEDLIMIT_AREA.cords,
+            function=self.editor.crop_circle_box
+        )"""
+        dataset = self.editor.crop_search_areas(
+            size=filter.size,
+            cords=filter.cords,
             function=self.editor.crop_circle_box
         )
         # num_datasets = len(self.models["speedlimit"].datasets)
@@ -324,29 +385,48 @@ class CarlaGame(object):
         num_datasets = 1
         if num_datasets > 0:
             # dataset = self.models["speedlimit"].datasets.pop(0)
-            for (im, (x, y, r)) in dataset:
-                if self.sl_jobs < 10:
-                    self.admin.add_job(
-                        disnet.job.Job(
+            for (im, _) in dataset:
+                if self.sl_jobs < 50:
+                    args_key = str(uuid.uuid1())
+                    self.admin.screens_mc.set(args_key, pickle.dumps((im,)))
+                    self.sl_jobs += 1
+                    # self.admin.job_mc.set(args_key, pickle.dumps((im,)))
+                    # self.screens[args_key] = pickle.dumps((im,))
+
+                    self.jobs_queue.append(
+                        Job(
                             type="speedlimit",
-                            id=str(uuid.uuid1()),
-                            args=(im,)
+                            id=0,
+                            args=args_key
                         )
                     )
-                    self.sl_jobs += 1
-                    print("new job", time.time())
-                """
-                OCR preprocessing
-                r += 15
-                left, top, right, bottom = selfdrive.image.editor.adjust_image_box(
-                    box=(x - r, y - r, x + r, y + r),
-                    shape=im.shape
-                )
-                image = im[top:bottom, left:right]
-                """
+
         if self.timer.sec_loop():
             self.sl_jobs = 0
+            if len(self.jobs_queue) > 0:
+                # self.admin.put_jobs(self.jobs_queue)
+                self.jobs_queue = []
+            # self.forward_jobs()
             self.timer.start()
+
+    def _process_jobs(self):
+        """
+        print("Officially ready to process jobs!")
+        limit = 25
+        while True:
+            q_size = len(self.jobs_queue)
+            if q_size > 0:
+                pack_size = limit if q_size > limit else q_size
+                self.admin.put_jobs(self.jobs_queue[0:pack_size])
+                self.jobs_queue = self.jobs_queue[pack_size:]
+                print(f"Added {pack_size} jobs to server. 1 Sec sleep...")
+                start_time = time.time()
+                while time.time() - start_time < 1:
+                    time.sleep(0.2)
+            else:
+                time.sleep(0.2)
+        """
+        # time.sleep(1)
 
     def _update_distance(self):
         if self.timer.sec_loop():
@@ -363,7 +443,10 @@ class CarlaGame(object):
             """
             array = image_converter.to_rgb_array(self._main_image)
             if self.on_auto:
-                self._handle_speedlimit_detection(np.array(array))
+                if self.frame == 5:
+                    self.image_queue.put(np.array(array))
+                else:
+                    self.frame += 1
             surface = pygame.surfarray.make_surface(array.swapaxes(0, 1))
             self._display.blit(surface, (0, 0))
 
