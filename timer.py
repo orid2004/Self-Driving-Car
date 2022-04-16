@@ -1,7 +1,7 @@
 import time
 
 
-class SecTimer:
+class SecInterval:
     # --- Timer object ---
     def __init__(self):
         self.last_time = None
