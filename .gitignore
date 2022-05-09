@@ -4,3 +4,4 @@ output/*
 build/*
 generate.py
 local_client.py
+disnet/*

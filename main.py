@@ -189,7 +189,7 @@ class CarlaGame(object):
         self.player_measurements = None
         self.max_speed = 50
         self.admin = Admin(host="192.168.14.104")
-        self.admin.connect(supported_jobs=("admin", ["speedlimit"]))
+        self.admin.connect(supported_jobs=["speedlimit"])
         self.jobs_queue = []
         self.sl_jobs = 0
         self.image_queue = queue.Queue()
