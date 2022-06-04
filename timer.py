@@ -1,3 +1,5 @@
+import random
+import threading
 import time
 
 
@@ -21,3 +23,4 @@ class SecInterval:
     def stop(self):
         # --- stop counting ---
         self.__init__()
+

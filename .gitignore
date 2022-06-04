@@ -5,3 +5,6 @@ build/*
 generate.py
 local_client.py
 disnet/*
+*.log
+*.avi
+save
