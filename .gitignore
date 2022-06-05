@@ -2,9 +2,8 @@
 __pycache__/*
 output/*
 build/*
-generate.py
 local_client.py
 disnet/*
-*.log
 *.avi
-save
+selfdrive/save
+old/*

@@ -10,6 +10,6 @@ class ForwardAgent(Agent):
     """
     def run_step(self, measurements, sensor_data, directions, target):
         control = VehicleControl()
-        control.throttle = 0.9
+        control._throttle = 0.9
 
         return control

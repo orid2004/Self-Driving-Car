@@ -137,8 +137,8 @@ class CarlaClient(object):
             pb_message = args[0]
         else:
             pb_message = carla_protocol.Control()
-            pb_message.steer = kwargs.get('steer', 0.0)
-            pb_message.throttle = kwargs.get('throttle', 0.0)
+            pb_message._steer = kwargs.get('steer', 0.0)
+            pb_message._throttle = kwargs.get('throttle', 0.0)
             pb_message.brake = kwargs.get('brake', 0.0)
             pb_message.hand_brake = kwargs.get('hand_brake', False)
             pb_message.reverse = kwargs.get('reverse', False)

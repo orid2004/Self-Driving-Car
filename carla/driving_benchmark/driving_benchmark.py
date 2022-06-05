@@ -236,7 +236,7 @@ class DrivingBenchmark(object):
 
             logging.info("Controller is Inputting:")
             logging.info('Steer = %f Throttle = %f Brake = %f ',
-                         control.steer, control.throttle, control.brake)
+                         control._steer, control._throttle, control.brake)
 
             current_timestamp = measurements.game_timestamp
             # Get the distance travelled until now

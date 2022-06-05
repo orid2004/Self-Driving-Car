@@ -27,7 +27,6 @@ import logging
 import time
 
 import carla.client
-import lane_detection
 import cv2
 
 from timer import SecInterval
@@ -68,19 +67,26 @@ from carla.planner.map import CarlaMap
 from carla.settings import CarlaSettings
 from carla.tcp import TCPConnectionError
 
-from wheel import *
-
-# import selfdrive
-# from selfdrive.image.filters import CROP_SPEEDLIMIT_AREA
-# from selfdrive.image.editor import ImageEditor
-# from selfdrive.image.buffer import ImageBuffer
+import selfdrive
+from selfdrive.image.filters import CROP_SPEEDLIMIT_AREA
+from selfdrive.image.editor import ImageEditor
+from selfdrive import navigation
+from selfdrive import visualization_utils as vis_utils
+from selfdrive import vehicle_control
 
 from disnet.client import Admin
 from disnet.job import Job
 
 from collections import namedtuple
 
-Program_Control = namedtuple("Program_Control", ["up"])
+# Create and configure logger
+logging.basicConfig(filename=f"CarlaLog.log",
+                    format='%(asctime)s %(message)s',
+                    filemode='w')
+
+NavigationData = namedtuple("NavigationData", [
+    "forward", "right_count", "right_score", "left_count", "left_score", "non_zero", "mean_slope"
+])
 
 WINDOW_WIDTH = 800
 WINDOW_HEIGHT = 600
@@ -88,7 +94,6 @@ IS_ONLINE = False
 if IS_ONLINE:
     ADMIN = Admin(host="127.0.0.1")
 
-'''
 area_filter = CROP_SPEEDLIMIT_AREA
 area_filter.cords = (
     (0, 0), (50, 0), (100, 0), (150, 0), (200, 0), (250, 0), (300, 0), (350, 0), (400, 0),
@@ -97,7 +102,6 @@ area_filter.cords = (
     (0, 150), (50, 150), (100, 150), (150, 150), (200, 150), (250, 150), (300, 150), (350, 150), (400, 150),
     (0, 200), (50, 200), (100, 200), (150, 200), (200, 200), (250, 200), (300, 200), (350, 200), (400, 200),
 )
-'''
 
 
 def make_carla_settings(args):
@@ -173,7 +177,6 @@ class Interval:
             self.s_time = time.time()
 
 
-'''
 class SpeedLimitEditor(ImageEditor):
     """
     SpeedLimit editor that inherits from the base editor.
@@ -189,7 +192,6 @@ class SpeedLimitEditor(ImageEditor):
             minDist=6, dp=1.1, param1=150,
             param2=50, minRadius=20, maxRadius=50
         )
-'''
 
 
 class CarlaGame(object):
@@ -218,15 +220,16 @@ class CarlaGame(object):
         Self driving car settings
         ------------------------
         """
-        self.num_detections = 0
+        self.logger = logging.getLogger()
+        self.logger.setLevel(logging.DEBUG)
+        self.next_log = ""
         self.timer = SecInterval()
         self.timer.start()
-        self.on_capture = False  # capture mode flag
-        # self.im_buff = ImageBuffer("data")  # image buffer for data saving
         self.on_auto = False  # toggle auto-pilot
-        # self.editor = SpeedLimitEditor()  # speedlimit image editor for preprocessing
+        self.editor = SpeedLimitEditor()  # speedlimit image editor for preprocessing
         self.player_measurements = None
-        self.max_speed = 25
+        self.speed_limit = 30
+        self.max_speed = 30
         self.is_online = IS_ONLINE
         self.required_jobs = ["speedlimit"]
         if self.is_online:
@@ -234,53 +237,39 @@ class CarlaGame(object):
             self.admin.connect(supported_jobs=self.required_jobs)
         else:
             self.admin = None
+
         self.jobs_queue = []
         self.sl_jobs = 0
-        self.image_queue = queue.Queue()
+        self.speed_limit_queue = queue.Queue()
         self.frame = 0
-        self.wheel = Wheel()
-        self.adjust_index = 0
-        self.adjust_direction = ""
 
-        self.control = [0, 0, 0]
-        self.control_wait = False
-        self.last_adjust = None
-        self.trigger_adjust = False
-
-        self.level = 0
-        self.down = False
-
-        frameSize = (1600, 900)
-
-        self.export = cv2.VideoWriter('output_video.avi', cv2.VideoWriter_fourcc(*'DIVX'), 60, frameSize)
-        self.released = False
-
-        self.print_steer = False
+        self.control = vehicle_control.PhysicsControl()
+        self.export = cv2.VideoWriter('output_video.avi', cv2.VideoWriter_fourcc(*'DIVX'), 50, (1600, 900))
         self.last_turn = 0
+        self.masked_output = None
+        self.side_masked_output = None
+
+        # Flags
+        self.control_wait = False
         self.on_turn = False
-
-        self.wheel_set_target = False
-
         self.maintain_on_turn = False
+        self.video_released = False
 
-        def steer_back():
-            if self.wheel.steer > 0:
-                self.wheel.right(self.wheel.steer - 0.1)
-                if self.wheel.steer < 0:
-                    self.wheel.steer = 0
-            elif self.wheel.steer < 0:
-                self.wheel.left(self.wheel.steer + 0.1)
-                if self.wheel.steer > 0:
-                    self.wheel.steer = 0
+        def _steer_forward():
+            if self.control.steer > 0:
+                self.control.right(self.control.steer - 0.1)
+                if self.control.steer < 0:
+                    self.control.steer = 0
+            elif self.control.steer < 0:
+                self.control.left(self.control.steer + 0.1)
+                if self.control.steer > 0:
+                    self.control.steer = 0
 
-        self.steer_back_interval = Interval(func=steer_back, ms=100)
-
-        self.adjust_multiply = 1
+        self.steer_back_interval = Interval(func=_steer_forward, ms=150)
 
         for _ in range(4):
             threading.Thread(target=self._process_images).start()
         threading.Thread(target=self._share_jobs).start()
-        threading.Thread(target=self.adjust).start()
 
     """
     Carla client functions
@@ -348,9 +337,6 @@ class CarlaGame(object):
             pass
         if measurements is not None and sensor_data is not None:
             control = self._get_keyboard_control(pygame.key.get_pressed())
-            # if self.on_capture:
-            #   control = VehicleControl()
-            #  control.throttle = 0.25
             if self._city_name is not None:
                 self._position = self._map.convert_to_pixel([
                     measurements.player_measurements.transform.location.x,
@@ -368,89 +354,55 @@ class CarlaGame(object):
         if a new episode was requested.
         """
         if keys[K_r]:
-            if not self.released:
-                print("Export")
-                self.released = True
+            if not self.video_released:
+                print("Video export.")
+                self.video_released = True
                 self.export.release()
         control = VehicleControl()
         if keys[K_LEFT] or keys[K_a]:
-            self.wheel.left(.7)
+            self.control.left(.7)
         elif keys[K_RIGHT] or keys[K_d]:
-            self.wheel.right(.7)
+            self.control.right(.7)
         elif not self.on_auto:
-            self.wheel.steer = 0
-            # self.wheel.release()
+            self.control._steer = 0
         if keys[K_UP] or keys[K_w]:
-            self.wheel.throttle = 1
+            self.control._throttle = 1
         elif keys[K_DOWN] or keys[K_s]:
-            self.wheel.brake(1.0)
+            self.control.brake(1.0)
         elif not self.on_auto:
-            self.wheel.throttle = 0
+            self.control._throttle = 0
         if keys[K_SPACE]:
             control.hand_brake = True
         if keys[K_q]:
             self._is_on_reverse = True
         if keys[K_e]:
             self._is_on_reverse = False
-        if keys[K_p]:
-            '''
-            self._enable_autopilot = not self._enable_autopilot'''
-            self.wheel.release()
-        if keys[K_k]:
-            self.on_capture = True
-            print("[ON] capture mode")
-        if keys[K_l]:
-            self.on_capture = False
-            print("[OFF] capture mode")
-        if keys[K_c]:
-            print("ADJUST")
-            self.adjust_direction = "left"
-            self.trigger_adjust = True
-            '''
-            if not self.on_capture:
-                pass
-                #self.im_buff.save_to_disk("data")
-            else:
-                print("Cannot save data while on capture mode.")'''
         if keys[K_t]:
             self.on_auto = True
             self.max_speed = 30
+            self.logger.info("On Auto Pilot. Good Luck!")
             print("[ON] auto pilot")
         if keys[K_y]:
             self.max_speed = 70
             self.on_auto = False
-            self.control = [0, 0, 0]
             print("[OFF] auto pilot")
 
-        if True:
-            values = self.wheel.get_values()
-            control.steer = values.steer
-            control.throttle = self.wheel.throttle
-            control.brake = values.brake
-        # self.wheel.throttle = 0
-        self.wheel.brake_val = 0
-
-        '''
-        if self.control[0] > 0:
-            if self._get_speed() < self.max_speed:
-                control.throttle = self.control[0]
-            else:
-                control.throttle = 0.2
-
-        if self.control[1] != 0:
-            control.steer = self.control[1]
-
-        if self.control[2] != 0:
-            control.brake = self.control[2]'''
-
+        control.steer, control.throttle, control.brake = self.control.get_values()
         control.reverse = self._is_on_reverse
-        # control.throttle = 0.7
+        self.control.reset_brake_value()
+
         return control
 
     """
     Self-driving functions
     (Ori David - orid2004@gmail.com)
     """
+
+    def _add_log(self, text):
+        self.next_log += text + ' ' * 2 + '|' + ' ' * 2
+        if len(self.next_log) > 100:
+            self.logger.info(self.next_log)
+            self.next_log = ""
 
     def _get_speed(self):
         """
@@ -472,7 +424,7 @@ class CarlaGame(object):
                     self.admin.put_jobs(self.jobs_queue)
                     self.jobs_queue.clear()
             except Exception as e:
-                print(e)
+                self._add_log(f'Exception-{e}')
             time.sleep(0.1)
 
     def _process_images(self):
@@ -483,8 +435,8 @@ class CarlaGame(object):
         :return: None
         """
         while True:
-            while self.image_queue.qsize() > 0:
-                self._handle_speedlimit_detection(self.image_queue.get())
+            while self.speed_limit_queue.qsize() > 0:
+                self._handle_speedlimit_detection(self.speed_limit_queue.get())
             time.sleep(0.05)
 
     def _handle_speedlimit_detection(self, image_np):
@@ -495,7 +447,6 @@ class CarlaGame(object):
         """
         if not self.is_online:
             return
-        '''
         self.editor.img = image_np  # loads image into editor
         self.editor.implement_filter(selfdrive.image.filters.CROP_SPEEDLIMIT_SCREEN)  # crops the image
         # crop_search_areas returns potential arrays that may contain a speedlimit sign.
@@ -521,216 +472,321 @@ class CarlaGame(object):
         # Resets the timer
         if self.timer.sec_loop():
             self.sl_jobs = 0
-            self.timer.start()'''
+            self.timer.start()
 
-    def adjust(self):
-        while True:
-            if self.trigger_adjust:
-                mul = self.adjust_multiply
-                self.last_turn = time.time()
-                max_index = 5
-                if self.adjust_index < max_index:
-                    if self.adjust_direction == "left":
-                        self.wheel.left(0.04 * mul)
-                    else:
-                        self.wheel.right(0.04 * mul)
-                    self.adjust_index += 1
-                elif max_index <= self.adjust_index < max_index * 2:
-                    self.adjust_index += 1
-                    if self.adjust_direction == "left":
-                        self.wheel.right(0.015 * mul)
-                    else:
-                        self.wheel.left(0.015 * mul)
-                else:
-                    self.wheel.release()
-                    self.adjust_index = 0
-                    self.trigger_adjust = False
-            time.sleep(0.2)
-
-    def _steer_forward(self, value):
-        if time.time() - self.last_turn < 0.5:
+    def auto_steer_forward(self, value):
+        """
+        This function control the wheels as turn scores are very low.
+        It uses steer values that are very close to 0, this keeps the car
+        as parallel as possible.
+        :param value: turn score
+        """
+        if time.time() - self.last_turn < 0.5 or self.on_turn:
             return
         if abs(value) > 0.01:
+            # setting the right steer value
             steer_max = 0.4 if self._get_speed() < 20 else 0.2
             if abs(value) < 0.025:
                 steer_max *= 0.75
             if value > 0:
                 score = value / 0.20
-                func = self.wheel.right
-                print('[right]', round(steer_max * score, 4))
+                func = self.control.right
             else:
                 value = abs(value)
                 score = value / 0.12
-                func = self.wheel.left
-                print('[left]', round(steer_max * score, 4))
+                func = self.control.left
+
+            # calling the matching function (either right ot left)
             turn_value = steer_max * score
-            if self.on_turn:
-                turn_value = 0.4
+            self._add_log(f'{"R" if value > 0 else "L"} adj ({round(steer_max * score, 3)})')
+
+            # skipping turns, as this function handles minor adjustments
             if turn_value > 0.5:
                 return
             func(turn_value)
-
         else:
-            self.wheel.right(0)
+            # We wish for a value lower or equal to 0.01
+            self.control.right(0)
 
-    def check_for_turns(self, non_zero_pixels):
-        if non_zero_pixels > 750:
-            #self.wheel.brake_mul = 2
+    def auto_accelerate(self, mean_slope):
+        """
+        This functions is mostly called after the adjustments, or
+        in case the car faces forward and can accelerate.
+        :param mean_slope:
+        """
+        if self._get_speed() < self.max_speed - 5 and not self.on_turn:
+            # matching a relevant throttle value
+            if self.max_speed < 15:
+                value = 0.6
+            elif self.max_speed <= 20:
+                value = 0.65
+            else:
+                value = 0.7
+            self.control.accelerate(value)
+        if not self.on_turn:
+            if mean_slope is not None:
+                self.auto_steer_forward(mean_slope)
+            else:
+                self.steer_back_interval.try_calling()
+        self.maintain_on_turn = False
+
+    def auto_get_relevant_max_speed(self, non_zero_pixels):
+        """
+        Non zero pixels represent yellow lanes that are rotating either
+        left or right. For example, a 90 degree turn would return 1000-2500 pixels.
+        This function return a rational maximum speed according to the non zero value.
+        :param non_zero_pixels: number of non zero pixels found in predefined search areas.
+        :return : A rational speed limit
+        """
+        if non_zero_pixels > 100:
+            # breaking to a rational speed
+            self.control.set_brake_target(self.max_speed)
+
+        if non_zero_pixels >= 750:
             if not self.on_turn:
                 self.on_turn = True
-                self.wheel.steer_back_slowly = True
-                print("Start Turn")
-            self.max_speed = 8
-        elif non_zero_pixels > 200:
-            self.max_speed = 12
-        elif non_zero_pixels > 100:
-            self.wheel.brake_mul = 1
-            self.max_speed = 20
-        if 0 <= non_zero_pixels < 75:
+                self.control.steer_back_slowly = True
+            return 10
+        elif non_zero_pixels >= 200:
+            return 12
+        elif non_zero_pixels >= 100:
+            return 20
+        elif 75 <= non_zero_pixels < 100:
+            return 25
+        elif 0 <= non_zero_pixels < 75:
             if self.on_turn:
                 self.on_turn = False
-                self.wheel.steer_back_slowly = False
-                print("End RTuen")
-            self.wheel.brake_target = 0
-            self.max_speed = 30
+                self.control.steer_back_slowly = False
+            self.control.brake_target = 0
+            return self.speed_limit
 
-        if non_zero_pixels > 100:
-            #print("brake target to", self.max_speed)
-            self.wheel.set_brake_target(self.max_speed)
+    def _multiply_max_steer(self, max_value):
+        """
+        This function simply lowers the steer value as the car is faster, as
+        we normally do in real life.
+        :param max_value: maximum steer value
+        """
+        if self._get_speed() <= 15:
+            return max_value * 1.2
+        elif self._get_speed() <= 25:
+            return max_value * 0.5
+        elif self._get_speed() <= 35:
+            return max_value * 0.3
+        elif self._get_speed() <= 45:
+            return max_value * 0.15
+        else:
+            return max_value * 0.1
 
-    def auto_pilot_set_wheel(self, main_img, side_img):
-        # An array is passed every 5 frames to prevent overflow
-        if self.is_online:
-            self.image_queue.put(np.array(main_img))
-
-        blank_image = main_img.copy()
-        blank_image = cv2.resize(blank_image, (1600, 900))
-        image, lines = lane_detection.detect_lanes(
-            image=cv2.cvtColor(np.asarray(side_img), cv2.COLOR_RGB2BGR),
-            color=lane_detection.Yellow,
-            reg=lane_detection.RegionsOfInterest.steer_adjust
-        )
-        side_img, steer_score = lane_detection.draw_lines_simple(
-            img=image,
-            lines=lines
-        )
-        cv2.imshow('side', side_img)
-
-        image, lines = lane_detection.detect_lanes(
-            cv2.cvtColor(np.asarray(main_img), cv2.COLOR_RGB2BGR), lane_detection.Yellow,
-            lane_detection.RegionsOfInterest.turn_detection)
-        img, good, left, right, score_left, score_right, count_zero = lane_detection.draw_lines(image,
-                                                                                                lines)
-        cv2.imshow('lanes', img)
-
-        blank_image[0:600, 800:1600] = img
-        blank_image[400:900, 0:800] = side_img[0:500, :]
-
-        blank_image[0:600, 0:800] = cv2.cvtColor(main_img, cv2.COLOR_BGR2RGB)
-        blank_image = cv2.resize(blank_image, (1600, 900))
-        self.export.write(blank_image)
-        #cv2.imshow('blank', blank_image)
-        if self.on_auto:
-            self.check_for_turns(non_zero_pixels=count_zero)
-            if good == -1:
-                self.wheel.steer = 0
-                self.control_wait = True
-                return
-            elif self.control_wait and (good > 2 or left > 2 or right > 2):
-                self.control_wait = False
-            if (right < 3 and left < 3) and (good == -1 or good >= 5):
-                if self._get_speed() < self.max_speed - 5 and not self.on_turn:
-                    if self.max_speed < 15:
-                        value = 0.6
-                    elif self.max_speed <= 20:
-                        value = 0.65
-                    else:
-                        value = 0.7
-                    #print("GAS!")
-                    self.wheel.accelerate(value)
-                if not self.on_turn:
-                    if steer_score is not None:
-                        self._steer_forward(steer_score)
-                    else:
-                        self.steer_back_interval.try_calling()
+    def auto_handle_turns(self, data: NavigationData):
+        """
+        This function handles the auto-pilot turns. It sets a steer value
+        according to the navigation data.
+        :param data: navigation data
+        """
+        _, right_count, right_score, left_count, left_score, _, mean_slop = data
+        if left_count > right_count:
+            func = self.control.left
+            direction = "L"
+            score = left_score
+        else:
+            func = self.control.right
+            direction = "R"
+            score = right_score
+        if score < 0.21:
+            if self._get_speed() < 10:
+                self.control.accelerate(0.6)
+            else:
+                self.control.accelerate(0.75)
+            if mean_slop is not None and not self.control_wait:
+                self.auto_steer_forward(mean_slop)
+            self.maintain_on_turn = False
+        else:
+            if score < 0.4:
+                max_steer = 0.15 if self._get_speed() < 20 else 0.075
+                self.control.accelerate(0.6)
                 self.maintain_on_turn = False
-            elif not self.control_wait:
-                if left > right:
-                    func = self.wheel.left
-                    direction = "left"
-                    score = score_left
+            elif score < 0.6:
+                max_steer = 0.2 if self._get_speed() < 20 else 0.1
+                if not self.maintain_on_turn:
+                    self.control.accelerate(0.5)
+            else:
+                if score < 0.8:
+                    max_steer = 0.6 if self._get_speed() < 20 else 0.3
                 else:
-                    func = self.wheel.right
-                    direction = "right"
-                    score = score_right
-                if score < 0.21:
-                    if self._get_speed() < 10:
-                        self.wheel.accelerate(0.6)
-                    else:
-                        self.wheel.accelerate(0.75)
-                    if steer_score is not None and not self.control_wait:
-                        self._steer_forward(steer_score)
-                    self.maintain_on_turn = False
-                else:
-                    if score < 0.4:
-                        steer_max = 0.15 if self._get_speed() < 20 else 0.075
-                        #if self.on_turn:
-                         #   steer_max *= 3
-                        self.wheel.accelerate(0.6)
-                        self.maintain_on_turn = False
-                    elif score < 0.6:
-                        steer_max = 0.2 if self._get_speed() < 20 else 0.1
-                      #  if self.on_turn:
-                       #     steer_max *= 3
-                        if not self.maintain_on_turn:
-                            self.wheel.accelerate(0.5)
-                    else:
-                        if score < 0.8:
-                            steer_max = 0.6 if self._get_speed() < 20 else 0.3
-                        else:
-                            steer_max = 0.7 if self._get_speed() < 20 else 0.5
+                    max_steer = 0.7 if self._get_speed() < 20 else 0.5
 
-                        if self._get_speed() - self.max_speed > 2:
-                            diff = self._get_speed() - self.max_speed
-                            print("brake main")
-                            self.wheel.brake(diff / 10)
-                        else:
-                            self.maintain_on_turn = True
-                            self.wheel.accelerate(0.48)
-                        #if self.on_turn and count_zero < 750:
-                         #   steer_max *= 0.5
-                    current_speed = self._get_speed()
-                    if current_speed > 50:
-                        current_speed = 50
-                    if self._get_speed() <= 15:
-                        steer_max *= 1.2
-                    elif self._get_speed() <= 25:
-                        steer_max *= 0.5
-                    elif self._get_speed() <= 35:
-                        steer_max *= 0.3
-                    elif self._get_speed() <= 45:
-                        steer_max *= 0.15
-                    else:
-                        steer_max *= 0.1
-                    value = steer_max * score
-                    if value <= 0:
-                        value = 0.05
-                    elif value > 0.65:
-                        value = 0.65
-                    #if value > 0.6:
-                     #   self.wheel.steer_back_slowly = True
-                    func(value)
-                    print("turn", direction, round(value, 2), "score is", round(score, 2))
+                if self._get_speed() - self.max_speed > 2:
+                    diff = self._get_speed() - self.max_speed
+                    self.control.brake(diff / 10)
+                else:
+                    self.maintain_on_turn = True
+                    self.control.accelerate(0.48)
+
+            max_steer = self._multiply_max_steer(max_steer)
+            value = max_steer * score
+            if value <= 0:
+                value = 0.05
+            elif value > 0.65:
+                value = 0.65
+
+            func(value)
+            self._add_log(f"turn-{direction}-{round(value, 2)}-score-{round(score, 2)}")
+
+    def auto_process_input(self, main_img, side_view):
+        """
+        This function processes the images and detect lanes.
+        :param main_img: The main camera faces forward (and 15 degrees to the left).
+        The main image returns detections that are used to place the car inside its lane,
+        but not necessary facing forward.
+        :param side_view: The side camera records the lanes, 90 degrees to the left.
+        The side image returns detections that are used to straighten the car, and place it
+        as parallel as possible to the yellow lines.
+        """
+        main_img = cv2.cvtColor(np.asarray(main_img), cv2.COLOR_RGB2BGR)
+        side_view = cv2.cvtColor(np.asarray(side_view), cv2.COLOR_RGB2BGR)
+
+        height, width = main_img.shape[:2]
+
+        hough_lines, masked = navigation.detect_lanes(
+            img=main_img,
+            mask=navigation.Masks.yellow,
+            vertices=navigation.get_turn_detection_region(
+                width=width,
+                height=height
+            )
+        )
+        if hough_lines is None:
+            return None
+
+        lines, _ = navigation.filter_lines(
+            lines=hough_lines,
+            min_slope=0.1
+        )
+
+        if lines is None:
+            print("lines are None")
+            return None
+
+        navigation_scores: navigation.NavScores = navigation.process_lines(
+            image=main_img,
+            filtered_lines=lines
+        )
+
+        if navigation_scores is None:
+            return None
+
+        forward, right_count, right_score, left_count, left_score = navigation_scores
+
+        masked_output = vis_utils.visualize_lane_detection(
+            img=masked,
+            filtered_lines=lines,
+            scores=navigation_scores
+        )
+
+        non_zero_rectangle = navigation.get_non_zero_rectangle(
+            width=width,
+            height=height,
+            direction=navigation.Directions.right
+        )
+
+        non_zero = navigation.get_non_zero_pixels(
+            masked=masked,
+            rectangle=non_zero_rectangle,
+        )
+
+        vis_utils.visualize_non_zero_pixels(
+            img=masked_output,
+            rectangle=non_zero_rectangle,
+            non_zero_pixels=non_zero
+        )
+
+        side_hough_lines, side_masked = navigation.detect_lanes(
+            img=side_view,
+            mask=navigation.Masks.yellow,
+            vertices=navigation.get_steer_adjust_region(
+                width=width,
+                height=height
+            )
+        )
+
+        mean_slope = None
+        if side_hough_lines is not None:
+            side_lines, mean_slope = navigation.filter_lines(
+                lines=side_hough_lines
+            )
+
+            if mean_slope is not None:
+                side_masked_output = vis_utils.visualize_lane_detection_side_view(
+                    img=side_masked,
+                    filtered_lines=side_lines,
+                )
+                self.side_masked_output = side_masked_output
+                cv2.imshow('side-view', side_masked_output)
+
+        self.masked_output = masked_output
+        cv2.imshow('masked', masked_output)
+
+        return NavigationData(forward=forward, right_count=right_count, right_score=right_score,
+                              left_count=left_count, left_score=left_score, non_zero=non_zero,
+                              mean_slope=mean_slope)
+
+    def auto_process_detections(self, data: NavigationData):
+        """
+        This main function that process the detections. It mostly calls
+        the above functions if necessary:
+        * auto_get_relevant_max_speed()
+        * auto_accelerate()
+        * auto_handle_turns()
+
+        It also makes last minor adjustments, according to the current speed.
+        """
+        if not data:
+            # Drive forward as there are no other instructions
+            self.control.steer = 0
+            self.control_wait = True
+        else:
+            # Unpack the data tuple
+            forward, right_count, right_score, left_count, left_score, \
+            non_zero, mean_slope = data
+
+            # As detections are back, the wait flag is canceled
+            if self.control_wait and (forward > 2 or left_count > 2 or right_count > 2):
+                self.control_wait = False
+
+            # I set an appropriate speed, as cars must slow down before turns
+            max_speed = self.auto_get_relevant_max_speed(
+                non_zero_pixels=non_zero
+            )
+            self.max_speed = max_speed
+
+            # Settings control values according to data
+            if right_count < 3 and left_count < 3 and forward >= 5:
+                self.auto_accelerate(mean_slope=mean_slope)
+            elif not self.control_wait:
+                self.auto_handle_turns(data)
+
+            # Last adjustments
             if self._get_speed() - self.max_speed > 10:
                 diff = self._get_speed() - self.max_speed
-                print("BREAK!", diff / 20)
-                self.wheel.brake(diff / 20)
+                self.control.brake(diff / 20)
             if self._get_speed() >= self.max_speed:
-                self.wheel.set_maintain_settings()
-                self.wheel.maintain_speed()
-            if self.on_turn and self.wheel.steer < 0.4 and steer_score and steer_score > 0.4:
-                self.wheel.steer = 0.45
-                print("Turn assist ASSIST 0.4")
+                self.control.set_maintain_settings()
+                self.control.maintain_speed()
+            if self.on_turn and self.control.steer < 0.4 and mean_slope and mean_slope > 0.4:
+                self.control.steer = 0.42
+
+    def auto_pilot(self, main_img, side_view):
+        """
+        Auto Pilot!
+        This function is called from the Carla loop (Every frame).
+        :param main_img: Main camera output
+        "param side_view: Side camera output
+        """
+        nav_data: NavigationData = self.auto_process_input(
+            main_img=main_img,
+            side_view=side_view
+        )
+        self.auto_process_detections(data=nav_data)
 
     def _on_render(self):
         """Process and display main image"""
@@ -741,16 +797,27 @@ class CarlaGame(object):
             -----------------------------
             [1] speedlimit + ocr detection
             """
-
-            self.wheel.forward_speed = self.player_measurements.forward_speed
-            self.wheel.v = self._get_speed()
-            self.wheel.max_speed = self.max_speed
             array = image_converter.to_rgb_array(self._main_image)
             side_array = image_converter.to_rgb_array(self._side_image)
-            self.auto_pilot_set_wheel(
-                main_img=array,
-                side_img=side_array
-            )
+
+            if self.on_auto:
+                self.control.set_speed_values(
+                    forward_speed=abs(int(self.player_measurements.forward_speed)),
+                    max_speed=self.max_speed
+                )
+
+                if self.is_online and self.frame == 5:
+                    """Detect speed-limit signs"""
+                    self.speed_limit_queue.put(np.array(array))
+                    self.frame = 0
+
+                self.auto_pilot(
+                    main_img=array,
+                    side_view=side_array
+                )
+            self.frame += 1
+
+            # Pygame thing
             surface = pygame.surfarray.make_surface(array.swapaxes(0, 1))
             self._display.blit(surface, (0, 0))
 

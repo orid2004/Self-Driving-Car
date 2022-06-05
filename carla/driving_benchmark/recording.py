@@ -138,9 +138,9 @@ class Recording(object):
                 self._dict_measurements['pos_y'] = reward_vec[
                     i].transform.location.y
                 self._dict_measurements['steer'] = control_vec[
-                    i].steer
+                    i]._steer
                 self._dict_measurements['throttle'] = control_vec[
-                    i].throttle
+                    i]._throttle
                 self._dict_measurements['brake'] = control_vec[
                     i].brake
 
