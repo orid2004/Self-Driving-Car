@@ -7,3 +7,5 @@ disnet/*
 *.avi
 selfdrive/save
 old/*
+data/*
+scripts/*

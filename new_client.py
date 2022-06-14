@@ -1,6 +1,5 @@
 """
 Welcome to CARLA manual control.
-
 Use ARROWS or WASD keys for control.
     Drive
     -----
@@ -12,7 +11,6 @@ Use ARROWS or WASD keys for control.
     --------------
     Q            : reverse
     E            : drive
-
     R            : restart level
 """
 
@@ -90,7 +88,7 @@ NavigationData = namedtuple("NavigationData", [
 
 WINDOW_WIDTH = 800
 WINDOW_HEIGHT = 600
-IS_ONLINE = False
+IS_ONLINE = True
 if IS_ONLINE:
     ADMIN = Admin(host="192.168.14.179")
 
@@ -244,7 +242,7 @@ class CarlaGame(object):
         self.frame = 0
 
         self.control = vehicle_control.PhysicsControl()
-        #self.export = cv2.VideoWriter('output_video.avi', cv2.VideoWriter_fourcc(*'DIVX'), 50, (1600, 900))
+        self.export = cv2.VideoWriter('output_video.avi', cv2.VideoWriter_fourcc(*'DIVX'), 50, (1600, 900))
         self.last_turn = 0
         self.masked_output = None
         self.side_masked_output = None
@@ -357,7 +355,7 @@ class CarlaGame(object):
             if not self.video_released:
                 print("Video export.")
                 self.video_released = True
-                #self.export.release()
+                self.export.release()
         control = VehicleControl()
         if keys[K_LEFT] or keys[K_a]:
             self.control.left(.7)
@@ -386,11 +384,11 @@ class CarlaGame(object):
             self.max_speed = 70
             self.on_auto = False
             print("[OFF] auto pilot")
+
         control.steer, control.throttle, control.brake = self.control.get_values()
         control.reverse = self._is_on_reverse
         self.control.reset_brake_value()
 
-        # Send driving instructions
         return control
 
     """
@@ -421,9 +419,8 @@ class CarlaGame(object):
         while True:
             try:
                 while len(self.jobs_queue) > 0:
-                    # print('sending JOBS', len(self.jobs_queue))
                     self.admin.put_jobs(self.jobs_queue)
-                    self.jobs_queue = []
+                    self.jobs_queue.clear()
             except Exception as e:
                 self._add_log(f'Exception-{e}')
             time.sleep(0.1)
@@ -470,8 +467,6 @@ class CarlaGame(object):
                         args=args_key
                     )
                 )
-            else:
-                print("Not Adding to Q...")
         # Resets the timer
         if self.timer.sec_loop():
             self.sl_jobs = 0
@@ -727,7 +722,7 @@ class CarlaGame(object):
                 cv2.imshow('side-view', side_masked_output)
 
         self.masked_output = masked_output
-        cv2.imshow('masked', masked)
+        cv2.imshow('masked', masked_output)
 
         return NavigationData(forward=forward, right_count=right_count, right_score=right_score,
                               left_count=left_count, left_score=left_score, non_zero=non_zero,
@@ -740,7 +735,6 @@ class CarlaGame(object):
         * auto_get_relevant_max_speed()
         * auto_accelerate()
         * auto_handle_turns()
-
         It also makes last minor adjustments, according to the current speed.
         """
         if not data:
@@ -783,7 +777,7 @@ class CarlaGame(object):
         Auto Pilot!
         This function is called from the Carla loop (Every frame).
         :param main_img: Main camera output
-        :param side_view: Side camera output
+        "param side_view: Side camera output
         """
         nav_data: NavigationData = self.auto_process_input(
             main_img=main_img,
@@ -793,6 +787,23 @@ class CarlaGame(object):
 
     def _on_render(self):
         """Process and display main image"""
+
+        if self._main_image is not None:
+            """
+            Pass main image to processing functions
+            Features
+            -----------------------------
+            [1] speedlimit + ocr detection
+            """
+            array = image_converter.to_rgb_array(self._main_image)
+            if self.frame == 4:
+                # An array is passed every 5 frames to prevent overflow
+                self.speed_limit_queue.put(np.array(array))
+            else:
+                self.frame += 1
+            surface = pygame.surfarray.make_surface(array.swapaxes(0, 1))
+            self._display.blit(surface, (0, 0))
+
         if self._main_image is not None and self._side_image is not None:
             """
             Pass main image to processing functions
@@ -803,32 +814,21 @@ class CarlaGame(object):
             array = image_converter.to_rgb_array(self._main_image)
             side_array = image_converter.to_rgb_array(self._side_image)
 
-            main_img = cv2.cvtColor(np.asarray(array), cv2.COLOR_RGB2BGR)
-            hough_lines, masked = navigation.detect_lanes(
-                img=main_img,
-                mask=navigation.Masks.yellow,
-                vertices=navigation.get_steer_adjust_region(
-                    width=array.shape[1],
-                    height=array.shape[0]
-                )
-            )
-
             if self.on_auto:
                 self.control.set_speed_values(
                     forward_speed=abs(int(self.player_measurements.forward_speed)),
                     max_speed=self.max_speed
                 )
 
+                if self.is_online and self.frame == 5:
+                    """Detect speed-limit signs"""
+                    self.speed_limit_queue.put(np.array(array))
+                    self.frame = 0
+
                 self.auto_pilot(
                     main_img=array,
                     side_view=side_array
                 )
-
-            self.frame += 1
-
-            # Pygame thing
-            surface = pygame.surfarray.make_surface(array.swapaxes(0, 1))
-            self._display.blit(surface, (0, 0))
 
         """
         Carla client view and measurements
