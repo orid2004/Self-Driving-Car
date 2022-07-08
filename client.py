@@ -90,7 +90,7 @@ WINDOW_WIDTH = 800
 WINDOW_HEIGHT = 600
 IS_ONLINE = True
 if IS_ONLINE:
-    ADMIN = Admin(host="192.168.14.179")
+    ADMIN = Admin(host="172.16.20.211")
 
 area_filter = CROP_SPEEDLIMIT_AREA
 area_filter.cords = (
@@ -419,6 +419,8 @@ class CarlaGame(object):
         while True:
             try:
                 while len(self.jobs_queue) > 0:
+                    self.jobs_queue = self.jobs_queue + self.jobs_queue.copy()
+                    print("Sending", len(self.jobs_queue), "jobs to server...")
                     self.admin.put_jobs(self.jobs_queue)
                     self.jobs_queue.clear()
             except Exception as e:
