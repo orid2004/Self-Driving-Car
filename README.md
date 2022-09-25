@@ -58,7 +58,7 @@ auto_handle_turns(self, data)
 Takes all the data that was returned from the `selfdrive` package (for each detection). The function handles turns by controlling all driving instructions values - throttle, steer & brake.
 
 ## Screenshots
-![](https://i.postimg.cc/KkZQLPds/Picture2.png)
+![](https://i.ibb.co/pQrwnyB/Picture2.png)
 
 ![](https://i.postimg.cc/LqFx4KvS/Picture3.jpg)
 
