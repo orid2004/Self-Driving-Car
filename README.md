@@ -57,12 +57,9 @@ auto_handle_turns(self, data)
 `main.py Line 585 (of this commit)`   
 Takes all the data that was returned from the `selfdrive` package (for each detection). The function handles turns by controlling all driving instructions values - throttle, steer & brake.
 
-## Diagram
-This diagram describes the data flow within each frame of the simulator. Each frame is passed to the selfdrive package, and then final driving instructions are generated (for this current frame).
-
-![](https://i.ibb.co/48cMs4j/download.png)
-
 ## Screenshots
-![](https://i.ibb.co/YL5ycqb/s1.jpg)
+![](https://i.postimg.cc/kBrqmD8h/Capture.jpg)
 
-![](https://i.ibb.co/HHZQZ9k/Whats-App-Image-2022-01-23-at-01-10-00.jpg)
+![](https://i.postimg.cc/ZCrZKZxY/Capture2.jpg)
+
+![](https://i.postimg.cc/MXfqN1cQ/Capture3.jpg)
