@@ -60,6 +60,6 @@ Takes all the data that was returned from the `selfdrive` package (for each dete
 ## Screenshots
 ![](https://i.ibb.co/pQrwnyB/Picture2.png)
 
-![](https://i.postimg.cc/LqFx4KvS/Picture3.jpg)
+![](https://i.ibb.co/WsHtVHp/Picture3.jpg)
 
-![](https://i.postimg.cc/QFT6rxQS/Picture4.png)
+![](https://i.ibb.co/HC5Q8FV/Picture4.png)
